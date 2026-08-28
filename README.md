@@ -26,10 +26,18 @@ cd facebook-ads-library-mcp
 pip install -r requirements.txt
 ```
 
-### **2. Get Facebook Access Token**
+### **2. Get Facebook Access Token** *(optional)*
 1. Go to [Facebook Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 2. Generate access token with `ads_read` permission
 3. (Optional) [Extend token](https://developers.facebook.com/tools/debug/accesstoken/) to 60 days
+
+> **You can skip this.** The Ad Library **web-scraping tools** (`search_ad_library`,
+> `scrape_ad_library_url`) need no token and work for **commercial ads in any country** —
+> see [Ad Library web scraping](#-ad-library-web-scraping-no-token-any-country) below. A
+> token is only needed for the `ads_archive` API tools (impressions/spend/demographics),
+> which Meta restricts to political & issue ads worldwide plus all ad types for the EU/UK.
+> If you do use one, put it in a `.env` file next to the script (`FACEBOOK_ACCESS_TOKEN=...`)
+> — it is auto-loaded, so it never has to sit in your MCP client config.
 
 ### **3. Configure Claude Desktop**
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -50,33 +58,63 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### **4. Restart Claude Desktop**
 
-## 🛠️ **15+ Advanced Tools**
+## 🛠️ **Tools**
+
+> **Shipped today:** `search_ad_library`, `scrape_ad_library_url` (web scraping, no token) ·
+> `search_facebook_ads`, `discover_competitor_brands`, `analyze_ad_creative_elements`,
+> `analyze_ad_performance_metrics`, `competitive_ad_analysis`,
+> `generate_facebook_intelligence_report`, `export_facebook_ads_data` (`ads_archive` API).
+> The entries below marked _(planned)_ are on the [ROADMAP](ROADMAP.md).
 
 ### **🔍 Search & Discovery**
 - **`search_facebook_ads()`** - Advanced search with multiple filters
 - **`discover_competitor_brands()`** - Find industry competitors automatically
-- **`find_similar_advertisers()`** - Discover brands with similar strategies
+- **`find_similar_advertisers()`** - Discover brands with similar strategies _(planned)_
 
 ### **📊 Deep Analysis**
 - **`analyze_ad_creative_elements()`** - AI-powered creative analysis
 - **`analyze_ad_performance_metrics()`** - Performance insights & KPIs
-- **`analyze_ad_targeting_insights()`** - Audience targeting analysis
+- **`analyze_ad_targeting_insights()`** - Audience targeting analysis _(planned)_
 
 ### **🎯 Monitoring & Tracking**
-- **`monitor_brand_ad_changes()`** - Real-time campaign monitoring
-- **`track_ad_spend_estimation()`** - Budget tracking & estimation
+- **`monitor_brand_ad_changes()`** - Real-time campaign monitoring _(planned)_
+- **`track_ad_spend_estimation()`** - Budget tracking & estimation _(planned)_
 
 ### **🏆 Competitive Intelligence**
 - **`competitive_ad_analysis()`** - Multi-brand strategy comparison
-- **`benchmark_against_industry()`** - Industry benchmarking
-- **`identify_market_opportunities()`** - Market gap analysis
+- **`benchmark_against_industry()`** - Industry benchmarking _(planned)_
+- **`identify_market_opportunities()`** - Market gap analysis _(planned)_
 
 ### **🔮 Prediction & Optimization**
-- **`predict_ad_performance()`** - ML-powered performance prediction
+- **`predict_ad_performance()`** - ML-powered performance prediction _(planned)_
 - **`generate_facebook_intelligence_report()`** - Comprehensive reports
 
 ### **🛠️ Utilities**
 - **`export_facebook_ads_data()`** - Export in JSON/CSV/Markdown
+
+## 🌎 **Ad Library web scraping (no token, any country)**
+
+The official `ads_archive` API does **not** return commercial ads for most of the world.
+These two tools render the public Ad Library SPA with a headless browser instead, so they
+work for **commercial ads in Mexico, LATAM, the US — anywhere**:
+
+- **`search_ad_library(query, country="MX", scroll_rounds=8, ...)`** — keyword search.
+  Returns structured cards: `advertiser` + Page id, `started_running`, `ads_using_creative`
+  (creatives sharing the copy — a scale proxy), `landing_domain`, `cta` button label,
+  `link_text` headline, full `body`, and `ad_details_url`. `scroll_rounds` drives
+  infinite-scroll so you get past the first ~24 results.
+- **`scrape_ad_library_url(url, scroll_rounds=8)`** — scrape any Ad Library URL you already
+  have (a prefilled search, a shared filter, an advertiser's "view all ads" page).
+- Pass `advertiser_page_id=` to `search_ad_library` to target one Page's **"all ads"** view
+  (heavier to render — fall back to a keyword search of the advertiser name if it's empty).
+
+```python
+# In your MCP client
+"Search the Mexico Ad Library for 'automatización con inteligencia artificial' and group the advertisers"
+"Pull every active ad from Page id 100094954977054"
+```
+
+See **[docs/examples.md](docs/examples.md)** for the full discovery → website-teardown → cadence workflow.
 
 ## 💡 **Usage Examples**
 

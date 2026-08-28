@@ -10,17 +10,21 @@ import re
 from urllib.parse import urlencode
 import time
 import base64
-from crawl4ai import WebCrawler
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env sitting next to this script so the token never has to live in MCP config
+load_dotenv(Path(__file__).resolve().parent / ".env")
+from crawl4ai import AsyncWebCrawler
 import asyncio
 
 class FacebookAdsLibraryAPI:
     """Complete Facebook Ads Library API wrapper with advanced features"""
-    
+
     def __init__(self, access_token: str):
         self.access_token = access_token
         self.base_url = "https://graph.facebook.com/v19.0/ads_archive"
-        self.crawler = WebCrawler()
-        
+
     def _make_request(self, params: dict) -> dict:
         """Make API request with error handling"""
         params['access_token'] = self.access_token
@@ -30,21 +34,25 @@ class FacebookAdsLibraryAPI:
             return response.json()
         except requests.exceptions.RequestException as e:
             return {"error": str(e), "success": False}
-    
+
     def _extract_ad_id_from_url(self, snapshot_url: str) -> str:
         """Extract ad ID from snapshot URL"""
         match = re.search(r'id=(\d+)', snapshot_url)
         return match.group(1) if match else None
-    
+
     def _analyze_ad_creative(self, snapshot_url: str) -> dict:
         """Analyze ad creative using web scraping"""
+        async def crawl_page():
+            async with AsyncWebCrawler(verbose=False) as crawler:
+                result = await crawler.arun(url=snapshot_url)
+                return {
+                    "text_content": result.cleaned_html,
+                    "extracted_text": result.extracted_content,
+                    "success": True
+                }
+
         try:
-            result = self.crawler.run(url=snapshot_url)
-            return {
-                "text_content": result.cleaned_html,
-                "extracted_text": result.extracted_content,
-                "success": True
-            }
+            return asyncio.run(crawl_page())
         except Exception as e:
             return {"error": str(e), "success": False}
 
@@ -91,23 +99,39 @@ def search_facebook_ads(
     params = {
         'search_terms': brand_name,
         'ad_reached_countries': [country],
-        'fields': 'id,ad_creation_time,ad_creative_bodies,ad_creative_link_captions,ad_creative_link_descriptions,ad_creative_link_titles,ad_snapshot_url,currency,demographic_distribution,delivery_by_region,impressions,page_id,page_name,publisher_platforms,spend',
+        'fields': 'id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_creative_bodies,ad_creative_link_captions,ad_creative_link_descriptions,ad_creative_link_titles,ad_snapshot_url,currency,demographic_distribution,delivery_by_region,impressions,page_id,page_name,publisher_platforms,spend',
         'limit': limit,
         'ad_active_status': 'ALL'
     }
-    
+
     if ad_type != "ALL":
         params['ad_type'] = ad_type
-    
+
     result = fb_api._make_request(params)
-    
+
     if result.get("success") is False:
         return result
-    
+
+    ads = result.get("data", [])
+    for ad in ads:
+        start = ad.get("ad_delivery_start_time")
+        if start:
+            try:
+                start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                stop = ad.get("ad_delivery_stop_time")
+                end_dt = datetime.fromisoformat(stop.replace("Z", "+00:00")) if stop else datetime.now(start_dt.tzinfo)
+                ad["days_active"] = (end_dt - start_dt).days
+            except (ValueError, TypeError):
+                ad["days_active"] = None
+        else:
+            ad["days_active"] = None
+
+    ads.sort(key=lambda a: (a.get("days_active") is None, -(a.get("days_active") or 0)))
+
     return {
         "brand": brand_name,
-        "total_ads": len(result.get("data", [])),
-        "ads": result.get("data", []),
+        "total_ads": len(ads),
+        "ads": ads,
         "search_params": params,
         "success": True
     }
@@ -561,14 +585,274 @@ def export_facebook_ads_data(
         "success": True
     }
 
+# ===== SCRAPING DEL AD LIBRARY WEB (no API — funciona para MX y cualquier país) =====
+# La Ad Library API oficial solo cubre anuncios políticos (mundial) y todo tipo en UE/UK.
+# Para anuncios comerciales de México se renderiza la SPA pública del Ad Library con crawl4ai.
+
+from urllib.parse import quote, urlparse, parse_qs, unquote
+
+AD_LIBRARY_BASE = "https://www.facebook.com/ads/library/"
+
+
+async def _render_ad_library(url: str, wait_seconds: int = 8, scroll_rounds: int = 8) -> dict:
+    """Render the Ad Library SPA and return its markdown. FB flags headless as 403 but
+    still serves the rendered ad cards, so success is judged by content, not status.
+
+    The Ad Library is an infinite-scroll SPA: the first paint only holds ~20-26 cards.
+    ``scroll_rounds`` drives that many extra scroll-to-bottom + wait cycles so lazy-loaded
+    cards (older ads, more advertisers) are in the DOM before it is serialised. Set it to 0
+    to keep just the first render (fast), or higher for a fuller sweep."""
+    from crawl4ai import CrawlerRunConfig, BrowserConfig, CacheMode
+    bc = BrowserConfig(headless=True, browser_type="chromium",
+                       viewport_width=1400, viewport_height=1600)
+    hydrate_ms = max(3, wait_seconds) * 1000
+    rounds = max(0, int(scroll_rounds))
+    js = (
+        f"await new Promise(r=>setTimeout(r,{hydrate_ms}));"
+        + "".join(
+            "window.scrollTo(0, document.body.scrollHeight);"
+            "await new Promise(r=>setTimeout(r,2500));"
+            for _ in range(rounds)
+        )
+        + "window.scrollTo(0, document.body.scrollHeight);"
+    )
+    cfg = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        delay_before_return_html=max(3, wait_seconds),
+        page_timeout=max(90000, 20000 + rounds * 3000),
+        js_code=[js],
+    )
+    async with AsyncWebCrawler(config=bc) as crawler:
+        r = await crawler.arun(url=url, config=cfg)
+        md = r.markdown.raw_markdown if hasattr(r.markdown, "raw_markdown") else str(r.markdown)
+        return {"markdown": md or "", "status_code": r.status_code}
+
+
+def _decode_landing_url(fb_link: str) -> str:
+    """Turn an l.facebook.com/l.php?u=... redirect into the real destination URL."""
+    try:
+        qs = parse_qs(urlparse(fb_link).query)
+        if "u" in qs:
+            return unquote(qs["u"][0])
+    except Exception:
+        pass
+    return fb_link
+
+
+# CTA button label sits as plain text immediately before the landing redirect link, e.g.
+#   ... Learn more ](https://l.facebook.com/l.php?u=...)
+# Match against Facebook's fixed set of button labels so we don't grab trailing caption words.
+_CTA_LABELS = (
+    "Learn more", "Sign up", "Shop now", "Book now", "Send message",
+    "Send WhatsApp message", "Contact us", "Subscribe", "Get offer", "Get quote",
+    "Apply now", "Download", "Watch more", "See menu", "Order now", "Donate now",
+    "Play game", "Listen now", "Get showtimes", "Save", "Open link", "Message page",
+    "Call now", "Get directions", "Follow page", "Use app", "Install now",
+    "Buy tickets", "Request time", "Try in camera",
+)
+_CTA_RE = re.compile(
+    r'\s(' + '|'.join(re.escape(c) for c in _CTA_LABELS) +
+    r')\s+\]\(https://l\.facebook\.com/l\.php', re.IGNORECASE)
+
+
+def _parse_ad_library_markdown(md: str) -> List[dict]:
+    """Best-effort structured extraction of ad cards from rendered Ad Library markdown."""
+    ads = []
+    seen = set()
+    # Each card starts at a "Library ID: <digits>" line
+    chunks = re.split(r'\nLibrary ID:\s*', md)
+    for chunk in chunks[1:]:
+        lib_id = re.match(r'(\d+)', chunk)
+        if not lib_id:
+            continue
+        lid = lib_id.group(1)
+        if lid in seen:  # infinite scroll can re-render the same card
+            continue
+        seen.add(lid)
+        ad = {
+            "library_id": lid,
+            # deep link to this specific ad's detail view (creative, spend range, EU targeting)
+            "ad_details_url": f"https://www.facebook.com/ads/library/?id={lid}",
+        }
+
+        m = re.search(r'Started running on ([A-Za-z]{3} \d{1,2}, \d{4})', chunk)
+        ad["started_running"] = m.group(1) if m else None
+
+        m = re.search(r'\*\*(\d+)\s+ads?\*\*\s+use this creative', chunk)
+        ad["ads_using_creative"] = int(m.group(1)) if m else 1
+
+        # advertiser: first [Name](facebook.com/<handle>/) link in the block
+        m = re.search(r'\[([^\]]+)\]\(https://www\.facebook\.com/([^/)]+)/?\)', chunk)
+        if m:
+            ad["advertiser"] = m.group(1)
+            ad["advertiser_handle"] = m.group(2)
+
+        # landing domain from the first l.facebook.com redirect
+        m = re.search(r'\(https://l\.facebook\.com/l\.php\?u=([^)&]+)', chunk)
+        if m:
+            real = _decode_landing_url("https://l.facebook.com/l.php?u=" + m.group(1))
+            ad["landing_url"] = real
+            ad["landing_domain"] = urlparse(real).netloc
+
+        # call-to-action button label (Learn more / Sign up / Send message / Shop now ...)
+        m = _CTA_RE.search(chunk)
+        ad["cta"] = m.group(1).strip() if m else None
+
+        # creative thumbnail + the headline/caption strip shown under it
+        m = re.search(r'\((https://scontent[^)]+?\.(?:jpe?g|png|webp)[^)]*)\)', chunk)
+        ad["creative_image"] = m.group(1) if m else None
+        if ad["cta"]:
+            # the creative card is [![<alt>](<img>) <headline/caption> <CTA> ](<l.facebook link>)
+            m = re.search(
+                r'\[!\[[^\]]*\]\(https?://scontent[^)]+\)\s+(.+?)\s+' + re.escape(ad["cta"]) +
+                r'\s+\]\(https://l\.facebook\.com', chunk, re.DOTALL)
+            if m:
+                link_text = re.sub(r'\s+', ' ', m.group(1)).strip()
+                # drop a leading shouted domain token ("FB.ME", "GLYVER.NET")
+                link_text = re.sub(r'^[A-Z0-9][A-Z0-9.\-]{2,}\s+', '', link_text)
+                ad["link_text"] = link_text[:400]
+
+        # body copy: text between "Sponsored" and the next structural marker
+        body = re.search(r'\*\*Sponsored\*\*\s*\n(.+?)(?:\n\[!\[|\nActive\n|\nInactive\n|$)',
+                         chunk, re.DOTALL)
+        if body:
+            txt = re.sub(r'\s+\n', '\n', body.group(1)).strip()
+            ad["body"] = txt[:2000]
+
+        ad["platforms"] = [p for p in ("Facebook", "Instagram", "Audience Network", "Messenger")
+                           if p in chunk]
+        ads.append(ad)
+    return ads
+
+
+@mcp.tool(description="Search the public Facebook Ad Library web (no API) for a keyword in a "
+                      "given country — works for Mexico and commercial ads. Renders the SPA "
+                      "with a headless browser, scrolls it to pull past the first page, and "
+                      "returns structured ad cards (advertiser, run date, creative count, "
+                      "landing domain, CTA button, headline, body). Pass advertiser_page_id "
+                      "with an empty query to pull every active ad from one Page.")
+def search_ad_library(
+    query: str = "",
+    country: str = "MX",
+    active_status: str = "active",
+    media_type: str = "all",
+    ad_type: str = "all",
+    advertiser_page_id: str = "",
+    wait_seconds: int = 8,
+    scroll_rounds: int = 8,
+) -> dict:
+    """
+    Args:
+        query: keyword(s) to search (advertiser name, product, angle...). Optional if
+               advertiser_page_id is given.
+        country: ISO country code the ads were delivered in (MX, US, ES, ...)
+        active_status: active | inactive | all
+        ad_type: all | political_and_issue_ads | employment_ads | housing_ads | financial_products_and_services_ads
+        media_type: all | image | meme | video | none
+        advertiser_page_id: if set, target that Page's "all ads" view (its numeric
+               advertiser_handle from a previous result) instead of a keyword search.
+               Note: this view is heavier client-rendered and does not always hydrate
+               under the headless browser — a keyword search of the advertiser's name is
+               the more reliable path.
+        wait_seconds: how long to let the SPA hydrate before scraping (raise if results are empty)
+        scroll_rounds: infinite-scroll cycles to load older/more ads past the first ~24
+               (0 = first render only, fast; 8 default; 15+ for a deep sweep)
+    """
+    if not query and not advertiser_page_id:
+        return {"success": False,
+                "error": "Pass either query or advertiser_page_id."}
+
+    params = {
+        "active_status": active_status,
+        "ad_type": ad_type,
+        "country": country,
+        "media_type": media_type,
+    }
+    if advertiser_page_id:
+        # the "all ads from this Page" view needs search_type=page, not a keyword search
+        params["view_all_page_id"] = advertiser_page_id
+        params["search_type"] = "page"
+        if query:
+            params["q"] = query
+    else:
+        params["search_type"] = "keyword_unordered"
+        params["q"] = query
+    url = AD_LIBRARY_BASE + "?" + "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+
+    try:
+        rendered = asyncio.run(_render_ad_library(url, wait_seconds, scroll_rounds))
+    except Exception as e:
+        return {"success": False, "error": str(e), "url": url}
+
+    md = rendered["markdown"]
+    ads = _parse_ad_library_markdown(md)
+    if not ads:
+        return {
+            "success": False,
+            "url": url,
+            "note": "No ad cards parsed. The page may be rate-limiting the headless browser "
+                    "or there are genuinely no results. Retry with a higher wait_seconds, or "
+                    "fall back to a real browser as documented in docs/examples.md.",
+            "status_code": rendered["status_code"],
+            "markdown_preview": md[:1500],
+        }
+
+    advertisers = {}
+    for a in ads:
+        name = a.get("advertiser", "unknown")
+        advertisers[name] = advertisers.get(name, 0) + 1
+
+    return {
+        "success": True,
+        "query": query or f"page_id:{advertiser_page_id}",
+        "country": country,
+        "url": url,
+        "scroll_rounds": max(0, int(scroll_rounds)),
+        "total_ads_parsed": len(ads),
+        "total_advertisers": len(advertisers),
+        "advertisers": dict(sorted(advertisers.items(), key=lambda x: -x[1])),
+        "ads": ads,
+        "raw_markdown": md[:16000],
+    }
+
+
+@mcp.tool(description="Scrape any Facebook Ad Library URL you already have (a prefilled search, "
+                      "an advertiser's 'view all ads' page, a shared filter link) and return "
+                      "structured ad cards plus the raw rendered text.")
+def scrape_ad_library_url(url: str, wait_seconds: int = 8, scroll_rounds: int = 8) -> dict:
+    """
+    Args:
+        url: a facebook.com/ads/library/... URL
+        wait_seconds: SPA hydration wait before scraping
+        scroll_rounds: infinite-scroll cycles to load more cards (0 = first render only)
+    """
+    if "facebook.com/ads/library" not in url:
+        return {"success": False, "error": "URL must be a facebook.com/ads/library/... link"}
+    try:
+        rendered = asyncio.run(_render_ad_library(url, wait_seconds, scroll_rounds))
+    except Exception as e:
+        return {"success": False, "error": str(e), "url": url}
+    md = rendered["markdown"]
+    ads = _parse_ad_library_markdown(md)
+    return {
+        "success": bool(ads),
+        "url": url,
+        "scroll_rounds": max(0, int(scroll_rounds)),
+        "total_ads_parsed": len(ads),
+        "ads": ads,
+        "raw_markdown": md[:16000],
+        "status_code": rendered["status_code"],
+    }
+
+
 if __name__ == "__main__":
-    # Validate API token
+    # The scraping tools (search_ad_library, scrape_ad_library_url) work with no token.
+    # Only the ads_archive API tools need one — warn but don't hard-exit.
     token = get_facebook_token()
     if not token:
-        print("❌ Facebook access token required!")
-        print("Usage: python facebook_ads_mcp_complete.py --facebook-token YOUR_TOKEN")
-        sys.exit(1)
-    
+        print("⚠️  No Facebook token found — the ads_archive API tools will fail, but the "
+              "Ad Library scraping tools still work.")
+
     print("✅ Facebook Ads Library MCP Server starting...")
-    print("🔧 Available tools: 8 advanced Facebook advertising intelligence tools")
+    print("🔧 Tools: 8 ads_archive API tools + 2 Ad Library web-scraping tools (MX-capable)")
     mcp.run(transport="stdio")

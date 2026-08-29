@@ -77,24 +77,10 @@ def test_empty_input():
     assert m._parse_ad_library_markdown("") == []
 
 
-def test_performance_metrics_flags_missing_data(monkeypatch):
-    # Simulate the API returning ordinary commercial ads (no spend/impressions/demographics)
-    monkeypatch.setattr(
-        m.fb_api, "_make_request",
-        lambda params: {"data": [{"id": "1", "ad_creation_time": "2026-01-01"},
-                                 {"id": "2", "ad_creation_time": "2026-01-02"}]},
-    )
-    out = m.analyze_ad_performance_metrics("SomeCommercialBrand")
-    assert out["data_available"] is False
-    assert out["ads_with_reported_metrics"] == 0
-    assert "political" in out["note"].lower()
-
-
-def test_performance_metrics_reports_data_when_present(monkeypatch):
-    monkeypatch.setattr(
-        m.fb_api, "_make_request",
-        lambda params: {"data": [{"id": "1", "spend": "$100-$199", "impressions": "5,000"}]},
-    )
-    out = m.analyze_ad_performance_metrics("SomePoliticalAdvertiser")
-    assert out["data_available"] is True
-    assert out["ads_with_reported_metrics"] == 1
+def test_only_scraping_tools_are_registered():
+    # The server is a pure Ad Library scraper — no ads_archive API tools.
+    assert hasattr(m, "search_ad_library")
+    assert hasattr(m, "scrape_ad_library_url")
+    for gone in ("search_facebook_ads", "analyze_ad_performance_metrics",
+                 "generate_facebook_intelligence_report", "fb_api"):
+        assert not hasattr(m, gone), f"{gone} should have been removed"

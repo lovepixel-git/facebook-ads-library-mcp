@@ -1,12 +1,6 @@
 # MCP server framework
 fastmcp>=2.6.1
 
-# Official Facebook Graph API calls (the ads_archive tools)
-requests>=2.32.3
-
-# Load FACEBOOK_ACCESS_TOKEN from a .env sitting next to the script
-python-dotenv>=1.0.0
-
 # Headless-browser rendering + HTML->markdown for the Ad Library scraper.
 # Pulls in playwright as a dependency; after installing, run:
 #   python -m playwright install chromium

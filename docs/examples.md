@@ -3,16 +3,17 @@
 The README shows one-liners ("analyze Nike"). This page is the **repeatable procedure** the
 server was actually built for: map who advertises in a niche, read their copy, see which
 creatives scale, then jump to their websites to understand *how they close and what backend
-they run*. No login, no token — the Ad Library web-scraping tools work for **commercial ads
-in any country**, including markets the official `ads_archive` API does not cover (it only
-returns political/issue ads worldwide, plus all ad types for the EU/UK).
+they run*. No login, no token — the two tools scrape the public Ad Library web app, so they
+work for **commercial ads in any country**. (Meta's official `ads_archive` API only returns
+political/issue ads worldwide plus all ad types for the EU/UK, which is why this server
+doesn't use it.)
 
-Two tool families:
+| Tool | What it does |
+|---|---|
+| `search_ad_library` | keyword search of the Ad Library for a country |
+| `scrape_ad_library_url` | scrape a specific Ad Library URL you already have |
 
-| Tool | Source | Needs a token? | Good for |
-|---|---|---|---|
-| `search_ad_library`, `scrape_ad_library_url` | scrapes the public Ad Library SPA (crawl4ai + headless Chromium) | no | commercial ads, any country, discovery + copy |
-| `search_facebook_ads`, `analyze_ad_performance_metrics`, ... | official Graph `ads_archive` API | yes (`ads_read`) | impressions/spend ranges, demographics — political/EU-UK only |
+Both render the SPA with crawl4ai + headless Chromium and parse the ad cards.
 
 ---
 
@@ -146,6 +147,5 @@ embedded booking widgets, chat widgets, which pixels fire, and form endpoints (e
   balance; `15+` for a full historical sweep of a busy query.
 - The scraper parses the public SPA markup, so a Facebook layout change can break field
   extraction. `raw_markdown` is always returned so you can re-parse by hand if needed.
-- The `.env` next to `facebook_ads_mcp_complete.py` is auto-loaded (`python-dotenv`), so
-  `FACEBOOK_ACCESS_TOKEN` never has to live in your MCP client config. It is only needed for
-  the `ads_archive` API tools.
+- No spend or impression numbers — Meta only publishes those for political ads. This is
+  creative / cadence / landing-page intelligence, not a budget estimator.

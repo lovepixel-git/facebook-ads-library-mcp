@@ -277,14 +277,19 @@ def analyze_ad_performance_metrics(
         return result
     
     ads = result.get("data", [])
-    
+
     # Aggregate metrics
     total_impressions = 0
     total_spend = 0
     platform_distribution = {}
     demographic_summary = {}
-    
+    # Meta only returns spend/impressions/demographics for political & issue ads.
+    # Track how many ads actually carried that data so we can be honest about it.
+    ads_with_spend_or_impressions = 0
+
     for ad in ads:
+        if ad.get("impressions") or ad.get("spend") or ad.get("demographic_distribution"):
+            ads_with_spend_or_impressions += 1
         # Impressions
         if "impressions" in ad:
             if ad["impressions"] != "≤1,000":
@@ -315,10 +320,13 @@ def analyze_ad_performance_metrics(
                 age_gender = f"{demo.get('age', 'unknown')}_{demo.get('gender', 'unknown')}"
                 demographic_summary[age_gender] = demographic_summary.get(age_gender, 0) + 1
     
-    return {
+    data_available = ads_with_spend_or_impressions > 0
+    response = {
         "brand": brand_name,
         "analysis_period": f"{time_period} days",
         "total_ads_analyzed": len(ads),
+        "data_available": data_available,
+        "ads_with_reported_metrics": ads_with_spend_or_impressions,
         "performance_summary": {
             "total_impressions": total_impressions,
             "estimated_total_spend": total_spend,
@@ -329,6 +337,14 @@ def analyze_ad_performance_metrics(
         },
         "success": True
     }
+    if not data_available:
+        response["note"] = (
+            "Meta's ads_archive API only reports spend, impressions and demographics for "
+            "political & issue ads. None of the ads matched here carried that data, so the "
+            "numeric totals above are 0 by absence, not by measurement. For commercial "
+            "brands use the search_ad_library scraping tool instead."
+        )
+    return response
 
 @mcp.tool(description="Comprehensive competitive ad analysis")
 def competitive_ad_analysis(
@@ -459,6 +475,9 @@ def generate_facebook_intelligence_report(
         # 2. Performance analysis
         performance = analyze_ad_performance_metrics(brand_name)
         report["detailed_findings"]["performance_metrics"] = performance.get("performance_summary", {})
+        report["detailed_findings"]["performance_data_available"] = performance.get("data_available", False)
+        if not performance.get("data_available", False):
+            report["detailed_findings"]["performance_note"] = performance.get("note")
         
         # 3. Recent activity analysis
         recent_ads = [ad for ad in basic_ads.get("ads", []) if ad.get("ad_creation_time")]
@@ -717,6 +736,10 @@ def _parse_ad_library_markdown(md: str) -> List[dict]:
                          chunk, re.DOTALL)
         if body:
             txt = re.sub(r'\s+\n', '\n', body.group(1)).strip()
+            # collapse "[visible text](l.facebook redirect)" links down to the visible text
+            txt = re.sub(r'\[([^\]]+)\]\(https?://l\.facebook\.com[^)]*\)', r'\1', txt)
+            # drop a trailing half-captured markdown link ("... offer: [https://x](https://l.fac")
+            txt = re.sub(r'\s*\[[^\]]*\]\([^)]*$', '', txt).strip()
             ad["body"] = txt[:2000]
 
         ad["platforms"] = [p for p in ("Facebook", "Instagram", "Audience Network", "Messenger")

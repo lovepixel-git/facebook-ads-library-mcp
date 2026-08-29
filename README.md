@@ -1,266 +1,145 @@
-# 🔥 Facebook Ads Library MCP - Advanced Intelligence Platform
+# Facebook Ads Library MCP
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![FastMCP](https://img.shields.io/badge/FastMCP-2.6+-green.svg)](https://github.com/modelcontextprotocol/python-sdk)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![FastMCP](https://img.shields.io/badge/FastMCP-3.x-green.svg)](https://github.com/jlowin/fastmcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Active](https://img.shields.io/badge/Status-Active-green.svg)](https://github.com/RamsesAguirre777/facebook-ads-library-mcp)
 
-> **The most powerful Facebook Ads Library MCP server with 15+ advanced tools for competitive intelligence, market analysis, and advertising insights. Built with FastMCP and completely FREE.**
+> A free, self-hosted MCP server for pulling competitor ads out of the **Facebook Ad
+> Library** — both by scraping the public web UI (works for commercial ads, any country,
+> no token) and through Meta's official `ads_archive` Graph API (political & issue ads
+> worldwide, all ad types for the EU/UK).
 
-## 🌟 **Why This MCP?**
+Built as an open alternative to paid Ad Library scrapers (Apify actors, ScrapeCreators,
+etc.). No account, no subscription — you run it locally and it drives a headless browser.
 
-**Beats paid services like ScrapeCreators ($497/month) with:**
-- ✅ **15+ Advanced Tools** vs their 5-6 basic ones
-- ✅ **AI-Powered Creative Analysis** (they don't have this)
-- ✅ **ML Performance Prediction** (they don't have this)
-- ✅ **Direct API Access** (no proxy limitations)
-- ✅ **100% Free & Open Source** (vs $497/month)
-- ✅ **Complete Customization** (add your own features)
+## What it actually does
 
-## 🚀 **Quick Start**
+| Capability | How | Needs a token? | Coverage |
+|---|---|---|---|
+| Keyword search of the public Ad Library | Headless-browser render of the SPA + HTML parse | No | Commercial ads, any country |
+| Scrape a specific Ad Library URL you already have | Same | No | Anything the URL shows |
+| `ads_archive` API search / spend / impressions / demographics | Meta Graph API | Yes (`ads_read`) | **Political & issue ads only** worldwide; all ad types only for EU/UK |
 
-### **1. Installation**
+The important limitation: Meta's official API does **not** expose spend, impressions or
+demographics for ordinary commercial ads outside the EU/UK. The API tools in this repo
+will tell you when a result set has no such data rather than inventing zeros. If you're
+researching normal brands (most people), use the scraping tools.
+
+## Install
+
 ```bash
 git clone https://github.com/RamsesAguirre777/facebook-ads-library-mcp.git
 cd facebook-ads-library-mcp
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+python -m playwright install chromium   # crawl4ai needs a browser
 ```
 
-### **2. Get Facebook Access Token** *(optional)*
-1. Go to [Facebook Graph API Explorer](https://developers.facebook.com/tools/explorer/)
-2. Generate access token with `ads_read` permission
-3. (Optional) [Extend token](https://developers.facebook.com/tools/debug/accesstoken/) to 60 days
+### Optional: Facebook token (only for the `ads_archive` API tools)
 
-> **You can skip this.** The Ad Library **web-scraping tools** (`search_ad_library`,
-> `scrape_ad_library_url`) need no token and work for **commercial ads in any country** —
-> see [Ad Library web scraping](#-ad-library-web-scraping-no-token-any-country) below. A
-> token is only needed for the `ads_archive` API tools (impressions/spend/demographics),
-> which Meta restricts to political & issue ads worldwide plus all ad types for the EU/UK.
-> If you do use one, put it in a `.env` file next to the script (`FACEBOOK_ACCESS_TOKEN=...`)
-> — it is auto-loaded, so it never has to sit in your MCP client config.
+1. [Graph API Explorer](https://developers.facebook.com/tools/explorer/) → generate a token with `ads_read`.
+2. Put it in a `.env` file next to the script — it's auto-loaded:
+   ```
+   FACEBOOK_ACCESS_TOKEN=EAAB...
+   ```
 
-### **3. Configure Claude Desktop**
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+You can skip this entirely if you only use `search_ad_library` / `scrape_ad_library_url`.
+
+### Register with your MCP client
+
+Claude Code:
+```bash
+claude mcp add facebook-ads -- /abs/path/to/venv/bin/python /abs/path/to/facebook_ads_mcp_complete.py
+```
+
+Claude Desktop (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "facebook_ads": {
-      "command": "python",
-      "args": [
-        "/path/to/facebook-ads-library-mcp/facebook_ads_mcp_complete.py",
-        "--facebook-token",
-        "YOUR_FACEBOOK_ACCESS_TOKEN"
-      ]
+    "facebook-ads": {
+      "command": "/abs/path/to/venv/bin/python",
+      "args": ["/abs/path/to/facebook_ads_mcp_complete.py"]
     }
   }
 }
 ```
 
-### **4. Restart Claude Desktop**
+## Tools
 
-## 🛠️ **Tools**
+### Web scraping — no token, any country
 
-> **Shipped today:** `search_ad_library`, `scrape_ad_library_url` (web scraping, no token) ·
-> `search_facebook_ads`, `discover_competitor_brands`, `analyze_ad_creative_elements`,
-> `analyze_ad_performance_metrics`, `competitive_ad_analysis`,
-> `generate_facebook_intelligence_report`, `export_facebook_ads_data` (`ads_archive` API).
-> The entries below marked _(planned)_ are on the [ROADMAP](ROADMAP.md).
+- **`search_ad_library(query, country="MX", active_status="active", media_type="all", ad_type="all", advertiser_page_id="", wait_seconds=8, scroll_rounds=8)`**
+  Keyword search. Renders the SPA, scrolls it `scroll_rounds` times to get past the first
+  ~24 cards, and returns structured records per ad: `advertiser` + Page handle,
+  `started_running`, `ads_using_creative` (how many creatives share the copy — a rough
+  scale signal), `landing_url` / `landing_domain`, `cta` button label, `link_text`
+  headline, full `body`, `creative_image`, `ad_details_url`. Also returns an
+  `advertisers` histogram and `raw_markdown` so the model can pull anything the parser missed.
 
-### **🔍 Search & Discovery**
-- **`search_facebook_ads()`** - Advanced search with multiple filters
-- **`discover_competitor_brands()`** - Find industry competitors automatically
-- **`find_similar_advertisers()`** - Discover brands with similar strategies _(planned)_
+- **`scrape_ad_library_url(url, wait_seconds=8, scroll_rounds=8)`**
+  Same rendering + parsing for any `facebook.com/ads/library/...` URL you already have —
+  a prefilled search, a shared filter link, an advertiser's "view all ads" page.
 
-### **📊 Deep Analysis**
-- **`analyze_ad_creative_elements()`** - AI-powered creative analysis
-- **`analyze_ad_performance_metrics()`** - Performance insights & KPIs
-- **`analyze_ad_targeting_insights()`** - Audience targeting analysis _(planned)_
+> Facebook returns HTTP 403 to the headless browser but still serves the rendered ad
+> cards, so these tools judge success by whether cards parsed, not by status code. If a
+> call comes back empty, raise `wait_seconds`, or fall back to a real browser
+> (see [docs/examples.md](docs/examples.md)).
 
-### **🎯 Monitoring & Tracking**
-- **`monitor_brand_ad_changes()`** - Real-time campaign monitoring _(planned)_
-- **`track_ad_spend_estimation()`** - Budget tracking & estimation _(planned)_
+### `ads_archive` Graph API — needs a token, political/EU-UK only
 
-### **🏆 Competitive Intelligence**
-- **`competitive_ad_analysis()`** - Multi-brand strategy comparison
-- **`benchmark_against_industry()`** - Industry benchmarking _(planned)_
-- **`identify_market_opportunities()`** - Market gap analysis _(planned)_
+- **`search_facebook_ads(brand_name, country="US", ad_type="ALL", date_range=30, limit=50)`** — archive search, sorted by days active.
+- **`discover_competitor_brands(industry_keywords, region="US", min_ads=5, limit=100)`** — group archive results by advertiser.
+- **`analyze_ad_creative_elements(ad_snapshot_url, ...)`** — fetch a snapshot URL and run keyword/CTA/urgency regex over the text.
+- **`analyze_ad_performance_metrics(brand_name, time_period=30, ...)`** — aggregate spend/impression/demographic ranges. Returns a `data_available: false` flag when the archive has no spend/impression data for the query (i.e. non-political ads).
+- **`competitive_ad_analysis(brands_list, ...)`** — compare the above across several advertisers.
+- **`generate_facebook_intelligence_report(brand_name, include_competitors=True, ...)`** — rolls the API tools into one report.
+- **`export_facebook_ads_data(brand_name, export_format="json", ...)`** — dump to JSON / CSV / Markdown.
 
-### **🔮 Prediction & Optimization**
-- **`predict_ad_performance()`** - ML-powered performance prediction _(planned)_
-- **`generate_facebook_intelligence_report()`** - Comprehensive reports
+The keyword/CTA/urgency detection in the analysis tools is plain regex, not a model —
+it's a cheap first pass, not "AI creative analysis".
 
-### **🛠️ Utilities**
-- **`export_facebook_ads_data()`** - Export in JSON/CSV/Markdown
+### Planned (not implemented — see [ROADMAP.md](ROADMAP.md))
 
-## 🌎 **Ad Library web scraping (no token, any country)**
+`find_similar_advertisers`, `analyze_ad_targeting_insights`, `monitor_brand_ad_changes`,
+`track_ad_spend_estimation`, `benchmark_against_industry`, `identify_market_opportunities`,
+`predict_ad_performance`.
 
-The official `ads_archive` API does **not** return commercial ads for most of the world.
-These two tools render the public Ad Library SPA with a headless browser instead, so they
-work for **commercial ads in Mexico, LATAM, the US — anywhere**:
-
-- **`search_ad_library(query, country="MX", scroll_rounds=8, ...)`** — keyword search.
-  Returns structured cards: `advertiser` + Page id, `started_running`, `ads_using_creative`
-  (creatives sharing the copy — a scale proxy), `landing_domain`, `cta` button label,
-  `link_text` headline, full `body`, and `ad_details_url`. `scroll_rounds` drives
-  infinite-scroll so you get past the first ~24 results.
-- **`scrape_ad_library_url(url, scroll_rounds=8)`** — scrape any Ad Library URL you already
-  have (a prefilled search, a shared filter, an advertiser's "view all ads" page).
-- Pass `advertiser_page_id=` to `search_ad_library` to target one Page's **"all ads"** view
-  (heavier to render — fall back to a keyword search of the advertiser name if it's empty).
-
-```python
-# In your MCP client
-"Search the Mexico Ad Library for 'automatización con inteligencia artificial' and group the advertisers"
-"Pull every active ad from Page id 100094954977054"
-```
-
-See **[docs/examples.md](docs/examples.md)** for the full discovery → website-teardown → cadence workflow.
-
-## 💡 **Usage Examples**
-
-### **Basic Competitive Analysis**
-```python
-# In Claude Desktop
-"Analyze Nike's current Facebook advertising strategy"
-"Compare ad strategies between Tesla and BMW"
-"Generate a complete intelligence report for Airbnb"
-```
-
-### **Advanced Market Research**
-```python
-# Discover competitors
-"Find all fitness app companies advertising on Facebook"
-
-# Market opportunities
-"Identify advertising gaps in the fintech industry"
-
-# Performance prediction
-"Predict performance for this ad: 'Get fit in 30 days with our AI trainer'"
-```
-
-### **Monitoring & Alerts**
-```python
-# Track competitor changes
-"Monitor Apple for new ad campaigns and alert me if they launch 5+ new ads"
-
-# Spend tracking
-"Estimate Shopify's monthly Facebook ad spend"
-```
-
-## 🔧 **Advanced Configuration**
-
-### **Environment Variables**
-```bash
-# Create .env file
-echo "FACEBOOK_ACCESS_TOKEN=your_token_here" > .env
-```
-
-### **Multiple Regions**
-```json
-{
-  "mcpServers": {
-    "facebook_ads_us": {
-      "command": "python",
-      "args": ["facebook_ads_mcp_complete.py", "--facebook-token", "US_TOKEN"]
-    },
-    "facebook_ads_eu": {
-      "command": "python", 
-      "args": ["facebook_ads_mcp_complete.py", "--facebook-token", "EU_TOKEN"]
-    }
-  }
-}
-```
-
-## 📈 **Performance Comparison**
-
-| Feature | ScrapeCreators | **Our MCP** | Savings |
-|---------|----------------|-------------|---------|
-| Monthly Cost | $497 | **$0** | $497/month |
-| Facebook Tools | 5-6 basic | **15+ advanced** | 3x more |
-| Creative Analysis | ❌ | ✅ **AI-powered** | Exclusive |
-| Performance Prediction | ❌ | ✅ **ML-based** | Exclusive |
-| Rate Limits | Restricted | **Direct API** | Unlimited |
-| Customization | ❌ | ✅ **Full control** | Infinite |
-
-## 🏗️ **Architecture**
+## Example
 
 ```
-Facebook Ads Library MCP
-├── Core API Wrapper
-│   ├── Authentication & Rate Limiting
-│   └── Error Handling & Retry Logic
-├── Search & Discovery Engine
-│   ├── Advanced Filtering
-│   └── Competitor Discovery
-├── AI Analysis Engine
-│   ├── Creative Element Analysis
-│   └── Performance Prediction
-├── Monitoring System
-│   ├── Real-time Change Detection
-│   └── Alert System
-└── Export & Reporting
-    ├── Multiple Format Support
-    └── Executive Reports
+"Search the Mexico Ad Library for 'automatización con inteligencia artificial',
+ group by advertiser, and list the landing domains."
+
+"Scrape https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=MX&q=nike&search_type=keyword_unordered
+ with scroll_rounds=15 and summarise the creative angles."
 ```
 
-## 🔒 **Security & Privacy**
+Full discovery → website-teardown → cadence workflow: **[docs/examples.md](docs/examples.md)**.
 
-- **No Data Storage** - All data processed in real-time
-- **Direct API Access** - No proxy servers or data logging
-- **Open Source** - Complete transparency
-- **Local Processing** - Your data stays on your machine
+## How the scraper works
 
-## 🤝 **Contributing**
+`crawl4ai` (`AsyncWebCrawler`) opens the Ad Library URL in headless Chromium, waits for
+the React app to hydrate, runs a scroll loop to trigger lazy-loaded cards, serialises the
+DOM to markdown, and a regex parser (`_parse_ad_library_markdown`) splits it on
+`Library ID:` boundaries and extracts the fields above. It's best-effort: Facebook's
+markup changes, and some fields (`platforms`) don't always survive the markdown
+conversion. `raw_markdown` is always returned as a fallback.
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+## Limitations
 
-### **Development Setup**
-```bash
-git clone https://github.com/RamsesAguirre777/facebook-ads-library-mcp.git
-cd facebook-ads-library-mcp
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements-dev.txt
-```
+- Scraping depends on Facebook's current DOM — expect to touch the parser periodically.
+- The `advertiser_page_id` / "view all ads" path is heavier client-rendered and doesn't
+  always hydrate headless; a keyword search of the advertiser name is more reliable.
+- The `ads_archive` API only covers political/issue ads (worldwide) and all ad types for
+  the EU/UK. There is no official API for commercial-ad spend anywhere else.
+- No caching or rate-limit handling yet — be reasonable with `scroll_rounds`.
 
-## 📖 **Documentation**
+## License
 
-- **[Setup Guide](docs/setup.md)** - Detailed installation instructions
-- **[API Reference](docs/api.md)** - Complete tool documentation
-- **[Examples](docs/examples.md)** - Real-world use cases
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues & solutions
+MIT — see [LICENSE](LICENSE).
 
-## 🔄 **Changelog**
+## Acknowledgments
 
-See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
-
-## 🆘 **Support**
-
-- **Issues**: [GitHub Issues](https://github.com/RamsesAguirre777/facebook-ads-library-mcp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/RamsesAguirre777/facebook-ads-library-mcp/discussions)
-- **Email**: [ramses.aguirre777@email.com](mailto:ramses.aguirre777@email.com)
-
-## 📄 **License**
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 **Acknowledgments**
-
-- [FastMCP](https://github.com/modelcontextprotocol/python-sdk) for the excellent MCP framework
-- [Crawl4AI](https://github.com/unclecode/crawl4ai) for AI-powered web crawling
-- [Facebook Graph API](https://developers.facebook.com/docs/graph-api) for providing access to ads data
-
-## ⭐ **Star History**
-
-[![Star History Chart](https://api.star-history.com/svg?repos=RamsesAguirre777/facebook-ads-library-mcp&type=Date)](https://star-history.com/#RamsesAguirre777/facebook-ads-library-mcp&Date)
-
----
-
-<div align="center">
-  <h3>🔥 Built with passion for the MCP community 🔥</h3>
-  <p>
-    <a href="https://twitter.com/RamsesAguirre777">Twitter</a> •
-    <a href="https://github.com/RamsesAguirre777">GitHub</a> •
-    <a href="https://linkedin.com/in/RamsesAguirre777">LinkedIn</a>
-  </p>
-</div>
+- [FastMCP](https://github.com/jlowin/fastmcp)
+- [crawl4ai](https://github.com/unclecode/crawl4ai)
+- [Facebook Ad Library](https://www.facebook.com/ads/library/) & the [Ad Library API](https://www.facebook.com/ads/library/api/)

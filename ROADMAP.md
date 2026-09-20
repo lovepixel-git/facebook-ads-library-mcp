@@ -70,3 +70,23 @@ the per-ad detail page. A rewrite helper shipped here briefly and produced a fie
   "what is working" proxy, since the Ad Library publishes no spend, CTR or ROAS.
 - Surface crawl4ai's anti-bot 403 instead of returning partial results as success. One
   pull logged `Blocked by anti-bot protection: HTTP 403` and still returned 35 ads.
+
+## Audit 2026-09-20 — three defects, two of which invalidated published counts
+
+1. **Fixed scroll rounds silently truncated every large advertiser.** Jade Leaf:
+   0 rounds -> 30 cards, 3 -> 79, 8 -> 94, still climbing. The cohort run used 3, so
+   every brand count it produced is a floor reported as a total. Now scrolls until the
+   document stops growing twice in a row, with `scroll_rounds` as a cap. Verified: caps
+   of 8, 20 and 40 all return 94 in ~37s, so a generous cap is free.
+2. **`raw_markdown` is truncated to 16,000 chars and I validated a probe against it.**
+   The parser always used the full document (126,320 chars for that pull), so ad counts
+   were never affected — but my evidence for "the duplication count string is gone" was
+   measured on the clipped field. Re-measured on full markdown: the count string appears
+   **once**, not zero, against 67 "multiple versions" markers. Upstream would have scored
+   1 ad right and defaulted 78 to "1". Conclusion held, stated number did not.
+3. **Every request returns HTTP 403** while still serving content, so status code proves
+   nothing and a genuine block would look identical to a good pull. Success is judged on
+   parsed cards. Determinism spot-check: three consecutive pulls returned 94/94/94.
+
+Still open: per-ad detail fetch for full-size creative, and surfacing the 403 as a
+distinct "blocked" state rather than folding it into a normal result.

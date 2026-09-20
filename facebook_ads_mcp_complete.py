@@ -48,14 +48,24 @@ async def _render_ad_library(url: str, wait_seconds: int = 8, scroll_rounds: int
                        viewport_width=1400, viewport_height=1600)
     hydrate_ms = max(3, wait_seconds) * 1000
     rounds = max(0, int(scroll_rounds))
+    # A FIXED round count silently truncates every large advertiser. Measured on Jade
+    # Leaf 2026-09-20: 0 rounds -> 30 cards, 3 -> 79, 8 -> 94, and still climbing. Any
+    # fixed number returns a floor and reports it as a total, which is the worst kind of
+    # wrong because it looks like a count. So scroll until the document stops growing,
+    # and treat `scroll_rounds` as a CAP rather than a target.
     js = (
         f"await new Promise(r=>setTimeout(r,{hydrate_ms}));"
-        + "".join(
-            "window.scrollTo(0, document.body.scrollHeight);"
-            "await new Promise(r=>setTimeout(r,2500));"
-            for _ in range(rounds)
-        )
-        + "window.scrollTo(0, document.body.scrollHeight);"
+        "let last=0, flat=0;"
+        f"for (let i=0;i<{rounds};i++) {{"
+        "  window.scrollTo(0, document.body.scrollHeight);"
+        "  await new Promise(r=>setTimeout(r,2500));"
+        "  const h=document.body.scrollHeight;"
+        # Two flat rounds, not one: the Ad Library often pauses a beat between
+        # lazy-loaded batches, and stopping on the first flat round cuts that batch off.
+        "  if (h<=last) { flat++; if (flat>=2) break; } else { flat=0; }"
+        "  last=h;"
+        "}"
+        "window.scrollTo(0, document.body.scrollHeight);"
     )
     cfg = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
@@ -145,10 +155,15 @@ def _parse_ad_library_markdown(md: str) -> List[dict]:
         # like ONE creative copied 8-11 times, so it is the best available proxy for
         # "this one is working". Two things were wrong with the original.
         #
-        # 1. Meta no longer renders "**N ads** use this creative" in the grid at all
-        #    (verified against a live Nio Teas pull 2026-09-20: 0 occurrences across 35
-        #    ads, while "This ad has multiple versions" appeared 3 times). The count
-        #    only exists behind "See summary details".
+        # 1. Meta almost never renders "**N ads** use this creative" in the grid any
+        #    more. Re-measured against FULL markdown 2026-09-20 (126,320 chars, Jade
+        #    Leaf, 79 cards): the count string appears ONCE, while "This ad has multiple
+        #    versions" appears 67 times. So upstream's regex would have scored 1 ad
+        #    correctly and silently defaulted the other 78 to "1".
+        #    CORRECTION: an earlier note here claimed 0 occurrences. That was measured
+        #    against the `raw_markdown` field, which is truncated to 16,000 chars - a
+        #    probe run on a clipped artifact. The conclusion held, the number did not.
+        #    Both signals are read below, count first, boolean second.
         # 2. It defaulted a MISS to 1. A broken regex then reads as "nobody duplicates
         #    anything", which is both false and the exact answer that stops you looking.
         #    A miss must be distinguishable from a genuine single, so it is None.

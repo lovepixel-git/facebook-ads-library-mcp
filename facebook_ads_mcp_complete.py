@@ -11,8 +11,9 @@ Tools:
   - scrape_ad_library_url(url, ...)           scrape a specific Ad Library URL
 """
 import asyncio
+import datetime as _dt
 import re
-from typing import List
+from typing import List, Optional
 from urllib.parse import quote, urlparse, parse_qs, unquote
 
 from fastmcp import FastMCP
@@ -94,6 +95,26 @@ _CTA_RE = re.compile(
     r')\s+\]\(https://l\.facebook\.com/l\.php', re.IGNORECASE)
 
 
+def _days_running(started: Optional[str]) -> Optional[int]:
+    """'Jun 24, 2026' -> days live as of today. None when the date did not parse, never 0:
+    a silent 0 would sort a broken parse to the bottom and look like a brand-new ad."""
+    if not started:
+        return None
+    try:
+        d = _dt.datetime.strptime(started, "%b %d, %Y").date()
+    except ValueError:
+        return None
+    return max(0, (_dt.date.today() - d).days)
+
+
+# TESTED AND DEAD - do not retry. The grid serves a 60x60 thumbnail via
+# `stp=dst-jpg_s60x60_tt6`, and `stp` is INSIDE the signature: dropping it, swapping it
+# for s600x600 or p600x600, or reducing it to `dst-jpg` all return HTTP 403 (checked
+# against live scontent URLs 2026-09-20). The full creative is only reachable from the
+# per-ad detail page, which is a separate fetch. A helper that rewrote the URL shipped
+# here briefly and produced a field that 403'd every time while looking correct.
+
+
 def _parse_ad_library_markdown(md: str) -> List[dict]:
     """Best-effort structured extraction of ad cards from rendered Ad Library markdown."""
     ads = []
@@ -115,9 +136,30 @@ def _parse_ad_library_markdown(md: str) -> List[dict]:
 
         m = re.search(r'Started running on ([A-Za-z]{3} \d{1,2}, \d{4})', chunk)
         ad["started_running"] = m.group(1) if m else None
+        # Longevity is the other half of the proxy - nobody keeps paying for a creative
+        # that loses. Precomputed here so callers rank on a number, not a date string.
+        ad["days_running"] = _days_running(ad["started_running"])
 
+        # Duplication is the whole point of this field: in this category scaling looks
+        # like ONE creative copied 8-11 times, so it is the best available proxy for
+        # "this one is working". Two things were wrong with the original.
+        #
+        # 1. Meta no longer renders "**N ads** use this creative" in the grid at all
+        #    (verified against a live Nio Teas pull 2026-09-20: 0 occurrences across 35
+        #    ads, while "This ad has multiple versions" appeared 3 times). The count
+        #    only exists behind "See summary details".
+        # 2. It defaulted a MISS to 1. A broken regex then reads as "nobody duplicates
+        #    anything", which is both false and the exact answer that stops you looking.
+        #    A miss must be distinguishable from a genuine single, so it is None.
         m = re.search(r'\*\*(\d+)\s+ads?\*\*\s+use this creative', chunk)
-        ad["ads_using_creative"] = int(m.group(1)) if m else 1
+        has_versions = bool(re.search(r'This ad has multiple versions', chunk, re.I))
+        if m:
+            ad["ads_using_creative"] = int(m.group(1))
+        elif has_versions:
+            ad["ads_using_creative"] = None      # known-duplicated, count not exposed
+        else:
+            ad["ads_using_creative"] = 1
+        ad["has_multiple_versions"] = has_versions
 
         # advertiser: first [Name](facebook.com/<handle>/) link in the block
         m = re.search(r'\[([^\]]+)\]\(https://www\.facebook\.com/([^/)]+)/?\)', chunk)
@@ -138,6 +180,12 @@ def _parse_ad_library_markdown(md: str) -> List[dict]:
 
         # creative thumbnail + the headline/caption strip shown under it
         m = re.search(r'\((https://scontent[^)]+?\.(?:jpe?g|png|webp)[^)]*)\)', chunk)
+        # The grid serves a 60x60 thumbnail (stp=dst-jpg_s60x60_tt6). That is fine for a
+        # link preview and useless for judging creative, which is what this tool is for.
+        # Dropping the stp transform returns the full upload.
+        # 60x60 only - see the note above _parse_ad_library_markdown. Named honestly so
+        # nobody builds a visual teardown on a thumbnail and wonders why it looks soft.
+        ad["creative_thumb_60px"] = m.group(1) if m else None
         ad["creative_image"] = m.group(1) if m else None
         if ad["cta"]:
             # the creative card is [![<alt>](<img>) <headline/caption> <CTA> ](<l.facebook link>)

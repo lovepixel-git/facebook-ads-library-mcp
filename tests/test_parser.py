@@ -84,3 +84,46 @@ def test_only_scraping_tools_are_registered():
     for gone in ("search_facebook_ads", "analyze_ad_performance_metrics",
                  "generate_facebook_intelligence_report", "fb_api"):
         assert not hasattr(m, gone), f"{gone} should have been removed"
+
+
+# --- OWT fork -----------------------------------------------------------------
+# Regression cover for the duplication signal. The upstream regex looked for
+# "**N ads** use this creative", which Meta no longer renders in the grid, and it
+# defaulted a miss to 1 - so a dead regex read as "nobody duplicates anything".
+# Live check 2026-09-20: 59 of 70 Jade Leaf ads are multi-version.
+
+_MULTI = """
+Library ID: 111
+Started running on Jun 24, 2026
+Platforms
+This ad has multiple versions
+Open Dropdown
+See ad details
+"""
+
+_SINGLE = """
+Library ID: 222
+Started running on Jun 24, 2026
+Platforms
+See ad details
+"""
+
+
+def test_multiple_versions_is_not_reported_as_one():
+    ad = m._parse_ad_library_markdown(_MULTI)[0]
+    assert ad["has_multiple_versions"] is True
+    # None, never 1 - a known-duplicated ad whose count Meta hides must not be
+    # indistinguishable from a genuinely single one.
+    assert ad["ads_using_creative"] is None
+
+
+def test_genuine_single_still_reports_one():
+    ad = m._parse_ad_library_markdown(_SINGLE)[0]
+    assert ad["has_multiple_versions"] is False
+    assert ad["ads_using_creative"] == 1
+
+
+def test_days_running_distinguishes_unparseable_from_today():
+    assert m._days_running("Jun 24, 2026") > 0
+    assert m._days_running(None) is None
+    assert m._days_running("not a date") is None

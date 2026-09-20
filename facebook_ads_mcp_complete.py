@@ -331,6 +331,86 @@ def scrape_ad_library_url(url: str, wait_seconds: int = 8, scroll_rounds: int = 
     }
 
 
+@mcp.tool(description="Rank an advertiser's live ads by the only working-creative proxy the "
+                      "Ad Library actually supports: how long an ad has been running, and "
+                      "whether it has been duplicated into multiple versions. Returns no "
+                      "spend, CTR or ROAS because Meta publishes none for commercial ads.")
+def rank_creatives(
+    query: str,
+    country: str = "US",
+    scroll_rounds: int = 4,
+    wait_seconds: int = 10,
+    limit: int = 20,
+    advertiser: str = "",
+) -> dict:
+    """Longevity x duplication, ranked.
+
+    The Ad Library exposes no performance data whatsoever. What it does expose is how long
+    an advertiser has kept paying for something and how many copies of it they are running.
+    Neither proves conversion; together they are evidence of advertiser BELIEF, which is
+    the strongest signal available here. Treat the output as "what they think works", never
+    as "what works".
+
+    Duplication outranks longevity in the sort because an advertiser duplicating a creative
+    has made an active decision to spend more on it, while an old ad may simply have been
+    left switched on.
+    """
+    res = search_ad_library(query=query, country=country,
+                            scroll_rounds=scroll_rounds, wait_seconds=wait_seconds)
+    ads = res.get("ads", [])
+
+    # The Ad Library keyword search matches AD TEXT, not the advertiser, so a brand name
+    # pulls in anyone who happened to type it. Checked 2026-09-20: searching "Rishi Tea"
+    # returned Sweetbird White Chocolate Sauce, and "Encha" returned a Portuguese Del Valle
+    # ad plus a Jade Leaf creative. Left unfiltered, a competitor ranking silently ranks
+    # strangers. Match on handle or name, both casefolded.
+    dropped = []
+    if advertiser:
+        want = advertiser.casefold().replace(" ", "")
+        kept = []
+        for a in ads:
+            hay = ((a.get("advertiser_handle") or "") + (a.get("advertiser") or "")).casefold().replace(" ", "")
+            (kept if want in hay else dropped).append(a)
+        ads = kept
+
+    def key(a):
+        # None days sorts last, never as 0 - an unparseable date is not a new ad.
+        return (1 if a.get("has_multiple_versions") else 0,
+                a.get("days_running") if a.get("days_running") is not None else -1)
+
+    ranked = sorted(ads, key=key, reverse=True)[:limit]
+    dated = [a["days_running"] for a in ads if a.get("days_running") is not None]
+    return {
+        "success": res.get("success", False),
+        "query": query,
+        "country": country,
+        "total_ads": len(ads),
+        "filtered_out": len(dropped),
+        "other_advertisers_seen": sorted({a.get("advertiser") or "?" for a in dropped})[:12],
+        "multi_version": sum(1 for a in ads if a.get("has_multiple_versions")),
+        "undated": len(ads) - len(dated),
+        "longest_days": max(dated) if dated else None,
+        "median_days": sorted(dated)[len(dated) // 2] if dated else None,
+        "caveat": ("No spend, CTR or ROAS exists in this data. Ranking is longevity x "
+                   "duplication, which measures advertiser belief, not conversion."),
+        "ranked": [
+            {
+                "library_id": a.get("library_id"),
+                "advertiser": a.get("advertiser"),
+                "days_running": a.get("days_running"),
+                "started_running": a.get("started_running"),
+                "multi_version": a.get("has_multiple_versions"),
+                "cta": a.get("cta"),
+                "landing_url": a.get("landing_url"),
+                "link_text": a.get("link_text"),
+                "body": (a.get("body") or "")[:400],
+                "ad_details_url": a.get("ad_details_url"),
+            }
+            for a in ranked
+        ],
+    }
+
+
 if __name__ == "__main__":
     print("Facebook Ad Library MCP — scraping tools: search_ad_library, scrape_ad_library_url")
     mcp.run(transport="stdio")

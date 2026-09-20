@@ -127,3 +127,32 @@ def test_days_running_distinguishes_unparseable_from_today():
     assert m._days_running("Jun 24, 2026") > 0
     assert m._days_running(None) is None
     assert m._days_running("not a date") is None
+
+
+# --- funnel inference ---------------------------------------------------------
+# Cases are real creatives pulled 2026-09-20, not invented ones.
+
+def test_replenishment_copy_is_bof():
+    r = m._infer_funnel_stage({"body": "Running low? Check if it's time to top up.",
+                               "landing_url": "", "cta": "Shop Now"})
+    assert r["stage"] == "BOF"
+
+
+def test_generic_shop_now_does_not_drown_a_real_signal():
+    # "Shop Now" is 95% of this vertical's ads (measured). Weighted like a real BOF
+    # signal it dragged consideration creative into BOF; this is that regression.
+    r = m._infer_funnel_stage({"body": "Find Your Favourite Matcha 5 Star Reviews",
+                               "landing_url": "", "cta": "Shop Now"})
+    assert r["stage"] == "MOF"
+
+
+def test_unreadable_ad_returns_no_stage_rather_than_a_default():
+    r = m._infer_funnel_stage({"body": "", "landing_url": "", "cta": ""})
+    assert r["stage"] is None and r["confidence"] == 0.0
+
+
+def test_every_label_carries_its_evidence():
+    r = m._infer_funnel_stage({"body": "meet the farmers",
+                               "landing_url": "https://x.com/pages/about",
+                               "cta": "Learn More"})
+    assert r["stage"] == "TOF" and r["signals"]

@@ -211,8 +211,97 @@ def _parse_ad_library_markdown(md: str) -> List[dict]:
 
         ad["platforms"] = [p for p in ("Facebook", "Instagram", "Audience Network", "Messenger")
                            if p in chunk]
+        ad["funnel"] = _infer_funnel_stage(ad)
         ads.append(ad)
     return ads
+
+
+# ---------------------------------------------------------------------------
+# Funnel-stage inference
+#
+# READ THIS BEFORE TRUSTING A LABEL. The Ad Library publishes no audience, no
+# campaign objective and no budget. Funnel stage is therefore INFERRED from what
+# the creative itself shows, never read from Meta. Every classification here is a
+# guess with its evidence attached, which is why `signals` ships alongside the
+# label - a wrong call should be visible, not silent.
+#
+# Weighting: the landing path is the strongest signal because it is a fact about
+# where the money is pointed, not a matter of wording. CTA is next. Copy markers
+# are weakest and most easily gamed by a clever headline.
+# ---------------------------------------------------------------------------
+
+# A signal that is near-constant across the corpus carries almost no information.
+# Measured on the 2026-09-20 pull: "Shop Now" is 95% of every ad in this vertical
+# (18/20 "Shop Now", 1 "Shop now", 1 "Buy tickets"). It is Meta's ecommerce default,
+# not a statement of intent, so scoring it like a real BOF signal pushed essentially
+# every ad to BOF - including "Find Your Favourite Matcha / 5 Star Reviews", which is
+# consideration content wearing a default button.
+#
+# So CTAs are split: the ones that actually discriminate keep full weight, the
+# ecommerce boilerplate keeps a token weight as a tiebreak only.
+_CTA_STAGE = {
+    "learn more": "TOF", "watch more": "TOF", "see menu": "TOF", "listen now": "TOF",
+    "sign up": "MOF", "get offer": "MOF", "download": "MOF", "get quote": "MOF",
+    "contact us": "MOF", "apply now": "MOF",
+    "subscribe": "BOF", "get deal": "BOF", "book now": "BOF",
+    "shop now": "BOF", "buy now": "BOF", "order now": "BOF",
+}
+_CTA_GENERIC = {"shop now", "buy now", "order now"}   # 95% of the corpus
+
+_PATH_STAGE = [
+    (r"/(blogs?|guide|learn|about|story|pages/[a-z-]*guide)", "TOF"),
+    (r"/(collections?|shop|quiz|compare|reviews?)", "MOF"),
+    (r"/(products?|cart|checkout|subscribe|subscriptions?)", "BOF"),
+    (r"[?&](discount|coupon|promo)=", "BOF"),
+]
+
+_COPY_STAGE = [
+    # BOF first: these are specific enough that a match is strong, and several of
+    # them ("running low", "reminder") would otherwise read as generic TOF prose.
+    (r"\b(running low|top up|time to reorder|reorder|restock|your reminder|"
+     r"subscribe (?:&|and) save|come back|still thinking|left in your cart|"
+     r"last chance|ends (?:today|tonight|soon))\b", "BOF"),
+    (r"\b(\d+ ?% off|free shipping|use code|save \$\d+)\b", "BOF"),
+    (r"\b(reviews?|rated|star|customers? (?:love|say)|why we|certified|"
+     r"third[- ]party|lab[- ]tested|compare|vs\.?)\b", "MOF"),
+    (r"\b(what is|how to|start here|beginner|never (?:made|tried)|guide to|"
+     r"the story|meet the)\b", "TOF"),
+]
+
+
+def _infer_funnel_stage(ad: dict) -> dict:
+    """Return {'stage', 'confidence', 'signals'} for one parsed ad."""
+    text = " ".join(filter(None, [ad.get("body"), ad.get("link_text")])).lower()
+    path = (ad.get("landing_url") or "").lower()
+    cta = (ad.get("cta") or "").strip().lower()
+
+    scores = {"TOF": 0.0, "MOF": 0.0, "BOF": 0.0}
+    signals = []
+
+    if path:
+        for pat, stage in _PATH_STAGE:
+            if re.search(pat, path):
+                scores[stage] += 3.0
+                signals.append(f"path:{stage}:{pat.split('(')[0] or pat}")
+                break
+    if cta in _CTA_STAGE:
+        w = 0.5 if cta in _CTA_GENERIC else 2.0
+        scores[_CTA_STAGE[cta]] += w
+        signals.append(f"cta:{_CTA_STAGE[cta]}:{cta}" + ("(generic)" if w == 0.5 else ""))
+    for pat, stage in _COPY_STAGE:
+        m = re.search(pat, text)
+        if m:
+            scores[stage] += 1.0
+            signals.append(f"copy:{stage}:{m.group(0)[:30]}")
+
+    total = sum(scores.values())
+    if total == 0:
+        # Honest unknown. Defaulting to a stage here would manufacture a finding
+        # out of an ad we simply could not read.
+        return {"stage": None, "confidence": 0.0, "signals": []}
+    stage = max(scores, key=scores.get)
+    return {"stage": stage, "confidence": round(scores[stage] / total, 2),
+            "signals": signals}
 
 
 @mcp.tool(description="Search the public Facebook Ad Library for a keyword in a given country "
@@ -393,6 +482,11 @@ def rank_creatives(
         "median_days": sorted(dated)[len(dated) // 2] if dated else None,
         "caveat": ("No spend, CTR or ROAS exists in this data. Ranking is longevity x "
                    "duplication, which measures advertiser belief, not conversion."),
+        "by_stage": {
+            st: sum(1 for a in ads if (a.get("funnel") or {}).get("stage") == st)
+            for st in ("TOF", "MOF", "BOF")
+        },
+        "stage_unknown": sum(1 for a in ads if not (a.get("funnel") or {}).get("stage")),
         "ranked": [
             {
                 "library_id": a.get("library_id"),
@@ -405,6 +499,7 @@ def rank_creatives(
                 "link_text": a.get("link_text"),
                 "body": (a.get("body") or "")[:400],
                 "ad_details_url": a.get("ad_details_url"),
+                "funnel": a.get("funnel"),
             }
             for a in ranked
         ],

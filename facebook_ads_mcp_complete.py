@@ -12,6 +12,7 @@ Tools:
 """
 import asyncio
 import datetime as _dt
+from collections import Counter
 import re
 from typing import List, Optional
 from urllib.parse import quote, urlparse, parse_qs, unquote
@@ -475,7 +476,23 @@ def rank_creatives(
         "country": country,
         "total_ads": len(ads),
         "filtered_out": len(dropped),
-        "other_advertisers_seen": sorted({a.get("advertiser") or "?" for a in dropped})[:12],
+        # The dropped pile is not waste, it is the discovery channel. A keyword query for
+        # a brand returns everyone ELSE paying to say that word, which is a competitor set
+        # derived from who is actually buying rather than who someone put on a list. The
+        # 2026-09-20 run binned 73 of 85 dropped ads for "Matcha.com" and with them Blue
+        # Bottle Coffee - OWT's own verified price comparator - plus Caribou, Basecamp and
+        # 3am Latte. Keep all of them, ranked by how many ads each is running.
+        "discovered_advertisers": [
+            {"advertiser": name, "ads": n,
+             "handle": next((a.get("advertiser_handle") for a in dropped
+                             if (a.get("advertiser") or "?") == name), None),
+             # One ad id per brand, so resolve_page_id() can turn a discovered name into
+             # a page id without a second search. Discovery that cannot be acted on is
+             # just a list of names.
+             "sample_library_id": next((a.get("library_id") for a in dropped
+                                        if (a.get("advertiser") or "?") == name), None)}
+            for name, n in Counter((a.get("advertiser") or "?") for a in dropped).most_common()
+        ],
         "multi_version": sum(1 for a in ads if a.get("has_multiple_versions")),
         "undated": len(ads) - len(dated),
         "longest_days": max(dated) if dated else None,
@@ -503,6 +520,99 @@ def rank_creatives(
             }
             for a in ranked
         ],
+    }
+
+
+@mcp.tool(description="Look up ALL live ads for one advertiser by their Ad Library page id, "
+                      "or by a page-name query. Use this for competitor research instead of "
+                      "search_ad_library, whose keyword search matches ad TEXT and will not "
+                      "reliably surface a brand's own ads.")
+def search_ads_by_page(
+    page_id: str = "",
+    page_query: str = "",
+    country: str = "US",
+    scroll_rounds: int = 8,
+    wait_seconds: int = 12,
+    active_only: bool = True,
+) -> dict:
+    """Page-scoped lookup. This is the correct instrument for "what is brand X running".
+
+    WHY THIS EXISTS. `search_ad_library` searches ad COPY, so a brand name only finds
+    ads that happen to contain those words - usually other people's. Measured 2026-09-20:
+    a keyword search for "Matcha.com" returned 85 ads, none of them Matcha.com's (Apple,
+    ChapStick, Blue Bottle), and "PerfectTed" returned 84 ads with no connection to
+    matcha or to PerfectTed at all. The Ad Library returns NOISE rather than an empty
+    set when it matches nothing, which is worse than zero because it reads as data.
+    The same page-scoped lookup returns 10 Matcha.com ads. The brand was never missing,
+    the instrument was wrong.
+
+    `page_id` is the numeric id in a `view_all_page_id=` URL - NOT the `?id=` value on a
+    single ad, which is an AD id and silently returns nothing here.
+    """
+    if not page_id and not page_query:
+        return {"success": False, "error": "pass page_id or page_query"}
+    status = "active" if active_only else "all"
+    base = (f"https://www.facebook.com/ads/library/?active_status={status}&ad_type=all"
+            f"&country={quote(country)}&media_type=all&search_type=page")
+    url = (base + f"&view_all_page_id={quote(str(page_id))}") if page_id \
+        else (base + f"&q={quote(page_query)}")
+    try:
+        rendered = asyncio.run(_render_ad_library(url, wait_seconds, scroll_rounds))
+    except Exception as exc:
+        return {"success": False, "url": url, "error": f"{type(exc).__name__}: {exc}"}
+
+    ads = _parse_ad_library_markdown(rendered.get("markdown") or "")
+    by_adv = Counter((a.get("advertiser") or "?") for a in ads)
+    dated = [a["days_running"] for a in ads if a.get("days_running") is not None]
+    return {
+        "success": True,
+        "url": url,
+        "page_id": page_id or None,
+        "page_query": page_query or None,
+        "total_ads": len(ads),
+        # A page view should be one advertiser. More than one means the view fell back
+        # to a broad result, so the caller can see that rather than trust a clean number.
+        "advertisers": by_adv.most_common(),
+        "multi_version": sum(1 for a in ads if a.get("has_multiple_versions")),
+        "longest_days": max(dated) if dated else None,
+        "by_stage": {st: sum(1 for a in ads
+                             if (a.get("funnel") or {}).get("stage") == st)
+                     for st in ("TOF", "MOF", "BOF")},
+        "ads": ads,
+    }
+
+
+@mcp.tool(description="Resolve an advertiser's numeric Ad Library page id from any one of "
+                      "their ad library ids. Needed because search_ads_by_page requires a "
+                      "page id and there is no reliable name lookup.")
+def resolve_page_id(ad_library_id: str, wait_seconds: int = 12) -> dict:
+    """ad id -> page id, by reading `view_all_page_id` off the ad's detail page.
+
+    Two dead ends were tested first, 2026-09-20, so nobody retries them:
+      * `search_type=page&q=<name>` still fuzzy-matches ad text. "PerfectTed" returned
+        Ted's Motorcycle World, "MatchaBar" returned NuGo Nutrition Bars and Lindt.
+      * `facebook.com/<handle>` logged out carries no pageID/entity_id in its markup
+        (1.4MB of HTML for naokimatcha, zero matches across four patterns).
+    The ad detail page does carry it, which is how Matcha.com's 1901063583461456 was
+    found after a keyword search for "Matcha.com" had returned 85 ads and none of theirs.
+    """
+    url = f"https://www.facebook.com/ads/library/?id={quote(str(ad_library_id))}"
+    try:
+        rendered = asyncio.run(_render_ad_library(url, wait_seconds, 1))
+    except Exception as exc:
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+    md = (rendered.get("markdown") or "") + (rendered.get("html") or "")
+    ids = list(dict.fromkeys(re.findall(r"view_all_page_id=(\d+)", md)))
+    ads = _parse_ad_library_markdown(rendered.get("markdown") or "")
+    return {
+        "success": bool(ids),
+        "ad_library_id": str(ad_library_id),
+        "page_id": ids[0] if ids else None,
+        # More than one id means the detail view rendered a grid; the caller should see
+        # that rather than trust the first number off the page.
+        "other_page_ids": ids[1:5],
+        "advertiser": ads[0].get("advertiser") if ads else None,
+        "advertiser_handle": ads[0].get("advertiser_handle") if ads else None,
     }
 
 
